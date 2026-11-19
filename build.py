@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Сборщик учебных отчётов по нормоконтролю (кафедра ПМ, РТУ МИРЭА) — версия 4.1.
+Сборщик учебных отчётов по нормоконтролю (кафедра ПМ, РТУ МИРЭА) — версия 4.2.
 
     python build.py                    -> собирает report.md рядом со скриптом
     python build.py путь/report.md     -> собирает указанный файл
@@ -69,7 +69,7 @@ except ImportError as e:  # pragma: no cover
     print("Выполните:  python -m pip install python-docx pillow lxml pymupdf")
     sys.exit(1)
 
-VERSION = "4.1"
+VERSION = "4.2"
 HERE = os.path.dirname(os.path.abspath(__file__))
 TEMPLATE = os.path.join(HERE, "template.docx")
 YEAR = datetime.date.today().year
@@ -3465,7 +3465,9 @@ def main():
     ap.add_argument("-o", "--output", default=None)
     ap.add_argument("--img", default=None, help="папка с рисунками")
     ap.add_argument("--init", nargs="?", const=".", default=None, metavar="ПАПКА",
-                    help="заготовка новой работы в папке (report.md, img/, code/, Собрать.bat)")
+                    help="новая работа: папка со сборщиком и заготовкой report.md")
+    ap.add_argument("--update", action="store_true",
+                    help="обновить сборщик в этой папке из общего комплекта")
     ap.add_argument("--pdf", action="store_true", help="сохранить ещё и PDF")
     ap.add_argument("--no-layout", action="store_true", help="не проверять вёрстку")
     ap.add_argument("--keep-temp", action="store_true", help=argparse.SUPPRESS)
@@ -3474,6 +3476,8 @@ def main():
     if a.init is not None:
         scaffold(a.init)
         return 0
+    if a.update:
+        return update_engine()
     if not os.path.exists(TEMPLATE):
         print("ОШИБКА: рядом с build.py нет файла template.docx")
         return 1
@@ -3706,52 +3710,161 @@ def main():
     return 0
 
 
-LAUNCHER = """@echo off
-chcp 65001 >nul
-rem Собирает report.md из этой папки общим сборщиком (папка указана в KIT).
-set "KIT={kit}"
-if not exist "%KIT%\\build.py" (
-    echo Сборщик не найден: %KIT%
-    echo Откройте этот файл в Блокноте и исправьте путь в строке set "KIT=..."
-    echo.
-    pause
-    exit /b 1
-)
-call "%KIT%\\Собрать.bat" "%~dp0report.md" %*
-"""
+# Файлы сборщика, которые кладутся в папку работы и обновляются командой --update.
+# report.md, img/ и code/ — это сама работа, их сборщик не трогает никогда.
+ENGINE = ["build.py", "template.docx", "Собрать.bat", "Отладка.bat", "Обновить сборщик.bat",
+          "AGENTS.md", "CLAUDE.md", "GEMINI.md", "ФОРМАТ.md", "НОРМОКОНТРОЛЬ.md"]
+
+UPDATER = ("@echo off\r\n"
+           "rem Updates build.py and docs in this folder from the shared kit folder\r\n"
+           "rem (the nearest folder with build.py and primery/ found above this one).\r\n"
+           "chcp 65001 >nul\r\n"
+           "set \"PY=python\"\r\n"
+           "where python >nul 2>nul || set \"PY=py\"\r\n"
+           "%PY% \"%~dp0build.py\" --update\r\n"
+           "echo.\r\n"
+           "pause\r\n")
 
 STUB = """[настройки]
-титул = да
-нумерация_объектов = по_разделам
-имя_файла = Отчёт
+// Состав работы и настройки предмета — из Кафедры.md (профиль предмета).
+// Всё необязательно; полный список и значения по умолчанию — в ФОРМАТ.md.
+титул = да                        // да | нет | N — заглушка на N листов (титул, задание…)
+нумерация_объектов = по_разделам  // по_разделам (Рисунок 1.1) | сквозная (Рисунок 1)
+разделы_с_новой_страницы = нет    // да — каждый раздел 1-го уровня с новой страницы
+имя_файла = ФамилияИО_ПРn         // имя готового .docx
+pdf = да                          // сохранить ещё и PDF
+// обязательно = СОДЕРЖАНИЕ; ВВЕДЕНИЕ; ЗАКЛЮЧЕНИЕ   // проверка, что разделы есть
+// нумерация_страниц_с = ВВЕДЕНИЕ
+// мин_источников = 5
+// свежесть_источников = 5
 
 # ЦЕЛЬ РАБОТЫ {-}
 
-Текст.
+**Цель работы:** сформулируйте цель.
+
+# Ход работы
+
+## Постановка задачи
+
+Опишите задание своими словами.
+
+## Выполнение
+
+Рисунки кладутся в папку img, ссылка пишется до рисунка: результат показан на
+Рисунке {рис:result}.
+
+[рис: result | img/result.png | Результат выполнения работы]
+
+После каждого рисунка — хотя бы одно предложение с выводом по нему.
+
+# ВЫВОДЫ {-}
+
+1. Первый вывод.
+2. Второй вывод.
+
+Завершающее предложение после списка.
 """
 
 
+def _copy_engine(src_dir, dst_dir):
+    """Копирует файлы сборщика из src_dir в dst_dir. -> список скопированных."""
+    done = []
+    for name in ENGINE:
+        src = os.path.join(src_dir, name)
+        dst = os.path.join(dst_dir, name)
+        if name == "Обновить сборщик.bat" and not os.path.exists(src):
+            with open(dst, "w", encoding="ascii", newline="") as f:
+                f.write(UPDATER)
+            done.append(name)
+            continue
+        if not os.path.exists(src):
+            continue
+        if os.path.abspath(src) == os.path.abspath(dst):
+            continue
+        if os.path.exists(dst):              # «только чтение» не мешает обновлению
+            os.chmod(dst, 0o666)
+        shutil.copyfile(src, dst)
+        os.chmod(dst, 0o666)
+        done.append(name)
+    return done
+
+
 def scaffold(target="."):
-    """Заготовка новой работы: report.md, img/, code/ и Собрать.bat, который вызывает
-    этот (общий) сборщик — копировать build.py в папку работы не нужно."""
+    """Новая работа: самостоятельная папка со сборщиком (build.py, шаблон, .bat,
+    инструкции для ИИ) и заготовкой report.md. Её можно копировать куда угодно;
+    свежий сборщик потом подтягивается «Обновить сборщик.bat» (= --update)."""
     root = os.path.abspath(target)
     os.makedirs(root, exist_ok=True)
     for d in ("img", "code"):
         os.makedirs(os.path.join(root, d), exist_ok=True)
-    made = []
+    made = _copy_engine(HERE, root)
     rp = os.path.join(root, "report.md")
     if not os.path.exists(rp):
         with open(rp, "w", encoding="utf-8") as f:
             f.write(STUB)
         made.append("report.md")
-    if os.path.abspath(root) != os.path.abspath(HERE):
-        with open(os.path.join(root, "Собрать.bat"), "w", encoding="utf-8", newline="\r\n") as f:
-            f.write(LAUNCHER.format(kit=HERE.rstrip("\\/")))
-        made.append("Собрать.bat")
-    print(f"Папка работы: {root}")
+    print(f"Папка работы: {root}   (сборщик {VERSION})")
     print("Создано: " + ", ".join(made + ["img/", "code/"]))
-    print("Дальше: заполните report.md, положите рисунки в img/ и запустите Собрать.bat "
-          "(или: python build.py путь/к/report.md)")
+    print("Дальше: заполните report.md, положите рисунки в img/ и дважды щёлкните "
+          "Собрать.bat")
+
+
+def is_kit(d):
+    """Общая папка комплекта: build.py рядом с примерами."""
+    return os.path.isfile(os.path.join(d, "build.py")) and \
+        os.path.isdir(os.path.join(d, "примеры"))
+
+
+def find_kit(start):
+    """Ищет комплект: переменная REPORT_KIT, затем папки-соседи на каждом уровне
+    вверх от start (ВУЗ\\Предмет\\ПР1 → ВУЗ\\Генерация отчётов)."""
+    env = os.environ.get("REPORT_KIT")
+    if env and is_kit(env):
+        return os.path.abspath(env)
+    cur = os.path.abspath(start)
+    for _ in range(8):
+        parent = os.path.dirname(cur)
+        if parent == cur:
+            break
+        try:
+            names = sorted(os.listdir(parent))
+        except OSError:
+            names = []
+        for n in names:
+            d = os.path.join(parent, n)
+            if os.path.isdir(d) and os.path.abspath(d) != os.path.abspath(HERE) and is_kit(d):
+                return d
+        cur = parent
+    return None
+
+
+def kit_version(d):
+    try:
+        with open(os.path.join(d, "build.py"), encoding="utf-8") as f:
+            m = re.search(r'^VERSION = "([^"]+)"', f.read(), re.M)
+        return m.group(1) if m else "?"
+    except OSError:
+        return "?"
+
+
+def update_engine():
+    """Обновляет сборщик в папке работы из общего комплекта."""
+    if is_kit(HERE):
+        print("Это сама папка комплекта — обновлять нечего (новая версия берётся с GitHub).")
+        return 0
+    kit = find_kit(HERE)
+    if not kit:
+        print("Не найдена папка комплекта (build.py + примеры/) выше этой папки.\n"
+              "Положите работу внутрь той же папки, где лежит комплект (например, ВУЗ),\n"
+              "или задайте путь: set REPORT_KIT=C:\\путь\\к\\Генерация отчётов")
+        return 1
+    old, new = VERSION, kit_version(kit)
+    done = _copy_engine(kit, HERE)
+    print(f"Комплект: {kit}")
+    print(f"Сборщик: {old} → {new}" if old != new else f"Сборщик: {new} (уже свежий, файлы освежены)")
+    print("Обновлено: " + ", ".join(done))
+    print("report.md, img/ и code/ не тронуты.")
+    return 0
 
 
 if __name__ == "__main__":
